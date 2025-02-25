@@ -16,8 +16,11 @@ import {
   Pagination,
   Center,
   LoadingOverlay,
+  Tooltip,
+  Progress,
 } from '@mantine/core';
-import { IconBrandTelegram, IconMoonStars, IconSun, IconUsers, IconMessage, IconShield } from '@tabler/icons-react';
+import { IconBrandTelegram, IconMoonStars, IconSun, IconUsers, IconMessage, IconShield, IconDashboard } from '@tabler/icons-react';
+import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
 interface GroupInfo {
@@ -52,6 +55,7 @@ interface MembersResponse {
 }
 
 export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
+  const navigate = useNavigate();
   const [groupLink, setGroupLink] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +63,7 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
   const [allMembers, setAllMembers] = useState<MemberInfo[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [loadingMembers, setLoadingMembers] = useState(false);
+  const [fetchProgress, setFetchProgress] = useState(0);
   const MEMBERS_PER_PAGE = 50;
 
   const getCurrentPageMembers = () => {
@@ -103,35 +108,88 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
 
   const fetchAllMembers = async (groupId: string) => {
     setLoadingMembers(true);
-    try {
-      let allFetchedMembers: MemberInfo[] = [];
-      let currentOffset = 0;
-      const batchSize = 50;
-      let hasMore = true;
+    setFetchProgress(0);
+    let retryCount = 0;
+    const maxRetries = 3;
 
-      while (hasMore) {
-        const response = await axios.get<MembersResponse>(
+    const attemptFetch = async () => {
+      try {
+        let allFetchedMembers: MemberInfo[] = [];
+        let currentOffset = 0;
+        const batchSize = 50;
+        let hasMore = true;
+
+        // Get total count first
+        const initialResponse = await axios.get<MembersResponse>(
           `http://localhost:8000/api/group-members/${groupId}`,
           {
             params: {
-              offset: currentOffset,
-              limit: batchSize
+              offset: 0,
+              limit: 1
             }
           }
         );
 
-        if (response.data.success && response.data.data.length > 0) {
-          allFetchedMembers = [...allFetchedMembers, ...response.data.data];
-          currentOffset += batchSize;
-          hasMore = response.data.has_more;
-        } else {
-          hasMore = false;
+        if (!initialResponse.data.success) {
+          throw new Error(initialResponse.data.error || 'Failed to get member count');
         }
-      }
 
-      setAllMembers(allFetchedMembers);
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to fetch members');
+        const totalMembers = initialResponse.data.total_count || 0;
+
+        while (hasMore) {
+          const response = await axios.get<MembersResponse>(
+            `http://localhost:8000/api/group-members/${groupId}`,
+            {
+              params: {
+                offset: currentOffset,
+                limit: batchSize
+              }
+            }
+          );
+
+          if (!response.data.success) {
+            throw new Error(response.data.error || 'Failed to fetch members');
+          }
+
+          if (response.data.data.length > 0) {
+            allFetchedMembers = [...allFetchedMembers, ...response.data.data];
+            currentOffset += batchSize;
+            hasMore = response.data.has_more;
+            
+            // Update progress
+            const progress = Math.min(Math.round((allFetchedMembers.length / totalMembers) * 100), 100);
+            setFetchProgress(progress);
+          } else {
+            hasMore = false;
+            setFetchProgress(100);
+          }
+        }
+
+        setAllMembers(allFetchedMembers);
+        return true;
+      } catch (err: any) {
+        if (retryCount < maxRetries) {
+          retryCount++;
+          setError(`Retrying... Attempt ${retryCount} of ${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before retry
+          return attemptFetch();
+        }
+        
+        const errorMessage = err.response?.data?.error || err.message || 'Failed to fetch members';
+        if (errorMessage.includes('Could not find the input entity')) {
+          setError('Unable to access the group. Please make sure the bot is a member of the group and has admin rights.');
+        } else {
+          setError(`${errorMessage}. Please try again later.`);
+        }
+        return false;
+      }
+    };
+
+    try {
+      const success = await attemptFetch();
+      if (!success) {
+        setAllMembers([]);
+      }
     } finally {
       setLoadingMembers(false);
     }
@@ -161,18 +219,30 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
             Telegram Group Parser
           </Group>
         </Title>
-        <ActionIcon
-          variant="outline"
-          color={isDark ? 'yellow' : 'blue'}
-          onClick={onToggleTheme}
-          title="Toggle theme"
-        >
-          {isDark ? (
-            <IconSun size={18} />
-          ) : (
-            <IconMoonStars size={18} />
-          )}
-        </ActionIcon>
+        <Group>
+          <Tooltip label="View token pool status">
+            <ActionIcon
+              variant="outline"
+              color={isDark ? 'blue' : 'blue'}
+              onClick={() => navigate('/token-status')}
+              title="Token pool status"
+            >
+              <IconDashboard size={18} />
+            </ActionIcon>
+          </Tooltip>
+          <ActionIcon
+            variant="outline"
+            color={isDark ? 'yellow' : 'blue'}
+            onClick={onToggleTheme}
+            title="Toggle theme"
+          >
+            {isDark ? (
+              <IconSun size={18} />
+            ) : (
+              <IconMoonStars size={18} />
+            )}
+          </ActionIcon>
+        </Group>
       </Group>
 
       <Paper shadow="sm" p="xl" radius="md" withBorder>
@@ -234,7 +304,6 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
             />
             <Button
               type="submit"
-              loading={loading}
               leftSection={<IconUsers size={16} />}
               style={{ 
                 flexShrink: 0,
@@ -290,8 +359,48 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
               Group ID: {groupInfo.group_id}
             </Text>
 
-            <div style={{ position: 'relative', minHeight: '400px' }}>
-              <LoadingOverlay visible={loadingMembers} />
+            <div style={{ 
+              position: 'relative', 
+              minHeight: '400px',
+              backgroundColor: isDark ? 'var(--mantine-color-dark-7)' : 'var(--mantine-color-white)',
+              borderRadius: 'var(--mantine-radius-md)',
+              border: `1px solid ${isDark ? 'var(--mantine-color-dark-4)' : 'var(--mantine-color-gray-3)'}`,
+            }}>
+              {loadingMembers && (
+                <div style={{
+                  position: 'absolute',
+                  top: '50%',
+                  left: '50%',
+                  transform: 'translate(-50%, -50%)',
+                  width: '80%',
+                  maxWidth: '400px',
+                  textAlign: 'center',
+                  zIndex: 1000
+                }}>
+                  <Text 
+                    size="lg" 
+                    fw={500} 
+                    mb="md"
+                    style={{
+                      color: isDark ? 'var(--mantine-color-blue-4)' : 'var(--mantine-color-blue-7)',
+                      fontFamily: '"SF Pro Text", sans-serif',
+                    }}
+                  >
+                    Fetching group members... {fetchProgress}%
+                  </Text>
+                  <Progress 
+                    value={fetchProgress}
+                    size="lg"
+                    radius="xl"
+                    striped
+                    animated
+                    color={fetchProgress === 100 ? 'green' : 'blue'}
+                    style={{
+                      backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-1)',
+                    }}
+                  />
+                </div>
+              )}
               {allMembers.length > 0 ? (
                 <>
                   <ScrollArea.Autosize mah={600} type="never">

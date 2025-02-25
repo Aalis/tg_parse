@@ -11,6 +11,7 @@ from telethon.tl.functions.channels import GetFullChannelRequest
 import asyncio
 import re
 import logging
+from app.core.token_pool import TokenPool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -59,35 +60,38 @@ class TelegramResponse(BaseModel):
     data: Optional[dict]
     error: Optional[str]
 
-# Initialize Telegram client
+class PoolStatus(BaseModel):
+    total_tokens: int
+    active_tokens: int
+    tokens: List[dict]
+
+# Initialize token pool
 API_ID = os.getenv("TELEGRAM_API_ID")
 API_HASH = os.getenv("TELEGRAM_API_HASH")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-if not all([API_ID, API_HASH, BOT_TOKEN]):
-    raise ValueError("TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_BOT_TOKEN must be set in environment variables")
+if not all([API_ID, API_HASH]):
+    raise ValueError("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in environment variables")
 
-# Create the client but don't start it yet
-client = TelegramClient('bot_session', API_ID, API_HASH)
+token_pool = TokenPool(API_ID, API_HASH)
 
 @app.on_event("startup")
 async def startup_event():
-    """Start the Telegram client when the FastAPI app starts"""
+    """Initialize all clients in the token pool when the FastAPI app starts"""
     try:
-        await client.start(bot_token=BOT_TOKEN)
-        logger.info("Telegram client started successfully")
+        await token_pool.initialize_clients()
+        logger.info("Token pool initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to start Telegram client: {e}")
+        logger.error(f"Failed to initialize token pool: {e}")
         raise
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Disconnect the Telegram client when the FastAPI app shuts down"""
+    """Close all client connections when the FastAPI app shuts down"""
     try:
-        await client.disconnect()
-        logger.info("Telegram client disconnected successfully")
+        await token_pool.close_all()
+        logger.info("All clients disconnected successfully")
     except Exception as e:
-        logger.error(f"Error disconnecting Telegram client: {e}")
+        logger.error(f"Error disconnecting clients: {e}")
 
 def extract_group_identifier(group_link: str) -> str:
     """Extract group username or chat_id from various link formats."""
@@ -107,9 +111,10 @@ def extract_group_identifier(group_link: str) -> str:
     
     return group_link
 
-@app.get("/")
-async def read_root():
-    return {"status": "ok", "message": "Telegram Group Parser API"}
+@app.get("/api/pool-status", response_model=PoolStatus)
+async def get_pool_status():
+    """Get the current status of the token pool"""
+    return token_pool.get_pool_status()
 
 @app.post("/api/parse-group", response_model=TelegramResponse)
 async def parse_group(group_link: str = Query(..., description="Telegram group link or username")):
@@ -122,6 +127,14 @@ async def parse_group(group_link: str = Query(..., description="Telegram group l
                 success=False,
                 data=None,
                 error="Invalid group link format"
+            )
+        
+        client = await token_pool.get_client()
+        if not client:
+            return TelegramResponse(
+                success=False,
+                data=None,
+                error="No available bot tokens"
             )
         
         try:
@@ -150,12 +163,14 @@ async def parse_group(group_link: str = Query(..., description="Telegram group l
             )
             
         except errors.ChatAdminRequiredError:
+            token_pool.mark_error(client)
             return TelegramResponse(
                 success=False,
                 data=None,
                 error="Bot needs to be an admin of the group to access this information"
             )
         except errors.ChannelPrivateError:
+            token_pool.mark_error(client)
             return TelegramResponse(
                 success=False,
                 data=None,
@@ -187,23 +202,38 @@ async def get_group_members(
     try:
         logger.info(f"Fetching members for group: {group_id} (offset: {offset}, limit: {limit})")
         
+        client = await token_pool.get_client()
+        if not client:
+            return GroupMembersResponse(
+                success=False,
+                data=None,
+                error="No available bot tokens",
+                total_count=None,
+                has_more=False
+            )
+        
         try:
-            # Convert group_id to proper format
-            if group_id.startswith('-100'):
-                entity_id = int(group_id)
-            elif group_id.isdigit():
-                entity_id = int(f"-100{group_id}")
-            else:
-                entity_id = group_id
-                
-            logger.info(f"Using entity ID: {entity_id}")
-            
-            # Get the entity first
+            # Convert group_id to proper format and get entity
             try:
-                entity = await client.get_entity(entity_id)
-            except ValueError:
-                # If numeric ID fails, try as username
-                entity = await client.get_entity(group_id)
+                if group_id.startswith('-100'):
+                    # For channels/supergroups, we need to use PeerChannel
+                    from telethon.tl.types import PeerChannel, InputPeerChannel
+                    channel_id = int(group_id[4:])  # Remove the -100 prefix
+                    entity = await client.get_entity(PeerChannel(channel_id))
+                    input_peer = InputPeerChannel(channel_id, entity.access_hash)
+                else:
+                    # For usernames or other formats
+                    entity = await client.get_entity(group_id)
+                    input_peer = await client.get_input_entity(entity)
+            except ValueError as e:
+                logger.error(f"Error getting entity: {str(e)}")
+                return GroupMembersResponse(
+                    success=False,
+                    data=None,
+                    error="Could not find the group. Please check if the group exists and is accessible.",
+                    total_count=None,
+                    has_more=False
+                )
             
             members = []
             total_count = 0
@@ -218,23 +248,37 @@ async def get_group_members(
             # Get administrators first (always include them)
             admin_ids = set()
             if offset == 0:  # Only fetch admins for the first page
-                async for admin in client.iter_participants(entity, filter=ChannelParticipantsAdmins):
-                    try:
-                        member_info = MemberInfo(
-                            user_id=admin.id,
-                            username=getattr(admin, 'username', None),
-                            first_name=getattr(admin, 'first_name', None),
-                            last_name=getattr(admin, 'last_name', None),
-                            is_premium=getattr(admin, 'premium', None),
-                            can_message=bool(getattr(admin, 'username', None)),
-                            is_admin=True,
-                            admin_title=getattr(admin, 'rank', None)
-                        )
-                        members.append(member_info)
-                        admin_ids.add(admin.id)
-                    except Exception as e:
-                        logger.warning(f"Error processing admin {admin.id}: {str(e)}")
-                        continue
+                try:
+                    from telethon.tl.functions.channels import GetParticipantsRequest
+                    from telethon.tl.types import ChannelParticipantsAdmins
+                    
+                    admins_result = await client(GetParticipantsRequest(
+                        channel=input_peer,
+                        filter=ChannelParticipantsAdmins(),
+                        offset=0,
+                        limit=100,  # Get all admins
+                        hash=0
+                    ))
+                    
+                    for admin in admins_result.users:
+                        try:
+                            member_info = MemberInfo(
+                                user_id=admin.id,
+                                username=getattr(admin, 'username', None),
+                                first_name=getattr(admin, 'first_name', None),
+                                last_name=getattr(admin, 'last_name', None),
+                                is_premium=getattr(admin, 'premium', None),
+                                can_message=bool(getattr(admin, 'username', None)),
+                                is_admin=True,
+                                admin_title=None  # We'll get this from participants info
+                            )
+                            members.append(member_info)
+                            admin_ids.add(admin.id)
+                        except Exception as e:
+                            logger.warning(f"Error processing admin {admin.id}: {str(e)}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error fetching admins: {str(e)}")
             
             # Calculate how many regular members to fetch
             remaining_limit = limit
@@ -242,36 +286,48 @@ async def get_group_members(
                 remaining_limit = max(0, limit - len(members))
                 regular_offset = 0
             else:
-                regular_offset = offset - len(admin_ids) if offset > len(admin_ids) else 0
+                regular_offset = offset
             
             # Get regular members
             if remaining_limit > 0:
-                all_participants = []
-                async for p in client.iter_participants(entity):
-                    if len(all_participants) >= regular_offset + remaining_limit:
-                        break
-                    if p.id not in admin_ids:
-                        all_participants.append(p)
-                
-                # Get the slice we need
-                participants_slice = all_participants[regular_offset:regular_offset + remaining_limit]
-                
-                for participant in participants_slice:
-                    try:
-                        member_info = MemberInfo(
-                            user_id=participant.id,
-                            username=getattr(participant, 'username', None),
-                            first_name=getattr(participant, 'first_name', None),
-                            last_name=getattr(participant, 'last_name', None),
-                            is_premium=getattr(participant, 'premium', None),
-                            can_message=bool(getattr(participant, 'username', None)),
-                            is_admin=False,
-                            admin_title=None
-                        )
-                        members.append(member_info)
-                    except Exception as e:
-                        logger.warning(f"Error processing member {participant.id}: {str(e)}")
-                        continue
+                try:
+                    from telethon.tl.functions.channels import GetParticipantsRequest
+                    from telethon.tl.types import ChannelParticipantsRecent
+                    
+                    participants_result = await client(GetParticipantsRequest(
+                        channel=input_peer,
+                        filter=ChannelParticipantsRecent(),
+                        offset=regular_offset,
+                        limit=remaining_limit,
+                        hash=0
+                    ))
+                    
+                    for participant in participants_result.users:
+                        if participant.id not in admin_ids:
+                            try:
+                                member_info = MemberInfo(
+                                    user_id=participant.id,
+                                    username=getattr(participant, 'username', None),
+                                    first_name=getattr(participant, 'first_name', None),
+                                    last_name=getattr(participant, 'last_name', None),
+                                    is_premium=getattr(participant, 'premium', None),
+                                    can_message=bool(getattr(participant, 'username', None)),
+                                    is_admin=False,
+                                    admin_title=None
+                                )
+                                members.append(member_info)
+                            except Exception as e:
+                                logger.warning(f"Error processing member {participant.id}: {str(e)}")
+                                continue
+                except Exception as e:
+                    logger.error(f"Error fetching regular members: {str(e)}")
+                    return GroupMembersResponse(
+                        success=False,
+                        data=None,
+                        error=f"Failed to fetch members: {str(e)}",
+                        total_count=None,
+                        has_more=False
+                    )
             
             # Calculate if there are more members to fetch
             has_more = (offset + len(members)) < total_count if total_count > 0 else len(members) >= limit
@@ -285,6 +341,7 @@ async def get_group_members(
             )
             
         except errors.ChatAdminRequiredError:
+            token_pool.mark_error(client)
             return GroupMembersResponse(
                 success=False,
                 data=None,
@@ -293,6 +350,7 @@ async def get_group_members(
                 has_more=False
             )
         except errors.ChannelPrivateError:
+            token_pool.mark_error(client)
             return GroupMembersResponse(
                 success=False,
                 data=None,

@@ -1,11 +1,46 @@
 import { MantineProvider, MantineThemeOverride } from '@mantine/core';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { TelegramParser } from './components/TelegramParser';
+import { TokenPoolStatus } from './components/TokenPoolStatus';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import '@mantine/core/styles.css';
 
 function App() {
-  const [isDark, setIsDark] = useState(false);
-  const toggleTheme = () => setIsDark(!isDark);
+  // Initialize theme from localStorage or default to false (light theme)
+  const [isDark, setIsDark] = useState(() => {
+    const savedTheme = localStorage.getItem('theme');
+    return savedTheme ? savedTheme === 'dark' : false;
+  });
+
+  const toggleTheme = () => {
+    const newTheme = !isDark;
+    setIsDark(newTheme);
+    localStorage.setItem('theme', newTheme ? 'dark' : 'light');
+  };
+
+  // Also sync with system preference changes
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    
+    const handleChange = (e: MediaQueryListEvent) => {
+      const systemPrefersDark = e.matches;
+      const savedTheme = localStorage.getItem('theme');
+      
+      // Only apply system preference if user hasn't explicitly chosen a theme
+      if (!savedTheme) {
+        setIsDark(systemPrefersDark);
+      }
+    };
+
+    mediaQuery.addEventListener('change', handleChange);
+    
+    // Initial check for system preference
+    if (!localStorage.getItem('theme')) {
+      setIsDark(mediaQuery.matches);
+    }
+
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
 
   const theme: MantineThemeOverride = {
     colorScheme: isDark ? 'dark' : 'light',
@@ -55,16 +90,31 @@ function App() {
   };
 
   return (
-    <MantineProvider theme={theme}>
-      <div style={{ 
-        padding: '2rem',
-        minHeight: '100vh',
-        background: isDark ? 'var(--mantine-color-dark-7)' : 'var(--mantine-color-gray-0)',
-        color: isDark ? 'var(--mantine-color-dark-0)' : 'inherit'
-      }}>
-        <TelegramParser onToggleTheme={toggleTheme} isDark={isDark} />
-      </div>
-    </MantineProvider>
+    <BrowserRouter>
+      <MantineProvider theme={theme}>
+        <div style={{ 
+          padding: '2rem',
+          minHeight: '100vh',
+          background: isDark ? 'var(--mantine-color-dark-7)' : 'var(--mantine-color-gray-0)',
+          color: isDark ? 'var(--mantine-color-dark-0)' : 'inherit'
+        }}>
+          <Routes>
+            <Route 
+              path="/" 
+              element={<TelegramParser onToggleTheme={toggleTheme} isDark={isDark} />} 
+            />
+            <Route 
+              path="/token-status" 
+              element={<TokenPoolStatus isDark={isDark} />} 
+            />
+            <Route 
+              path="*" 
+              element={<Navigate to="/" replace />} 
+            />
+          </Routes>
+        </div>
+      </MantineProvider>
+    </BrowserRouter>
   );
 }
 
