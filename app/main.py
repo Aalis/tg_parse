@@ -213,18 +213,19 @@ async def get_group_members(
             )
         
         try:
-            # Convert group_id to proper format and get entity
+            # Get the entity using proper channel ID handling
             try:
                 if group_id.startswith('-100'):
-                    # For channels/supergroups, we need to use PeerChannel
-                    from telethon.tl.types import PeerChannel, InputPeerChannel
+                    from telethon.tl.types import PeerChannel
                     channel_id = int(group_id[4:])  # Remove the -100 prefix
-                    entity = await client.get_entity(PeerChannel(channel_id))
-                    input_peer = InputPeerChannel(channel_id, entity.access_hash)
+                    # Create a PeerChannel object first
+                    peer = PeerChannel(channel_id)
+                    # Then get the full entity
+                    entity = await client.get_entity(peer)
                 else:
-                    # For usernames or other formats
                     entity = await client.get_entity(group_id)
-                    input_peer = await client.get_input_entity(entity)
+                
+                logger.info(f"Successfully got entity of type: {type(entity).__name__}")
             except ValueError as e:
                 logger.error(f"Error getting entity: {str(e)}")
                 return GroupMembersResponse(
@@ -242,6 +243,7 @@ async def get_group_members(
             try:
                 full_chat = await client(GetFullChannelRequest(entity))
                 total_count = full_chat.full_chat.participants_count
+                logger.info(f"Total member count: {total_count}")
             except Exception as e:
                 logger.warning(f"Could not get total member count: {str(e)}")
             
@@ -253,7 +255,7 @@ async def get_group_members(
                     from telethon.tl.types import ChannelParticipantsAdmins
                     
                     admins_result = await client(GetParticipantsRequest(
-                        channel=input_peer,
+                        channel=entity,
                         filter=ChannelParticipantsAdmins(),
                         offset=0,
                         limit=100,  # Get all admins
@@ -270,7 +272,7 @@ async def get_group_members(
                                 is_premium=getattr(admin, 'premium', None),
                                 can_message=bool(getattr(admin, 'username', None)),
                                 is_admin=True,
-                                admin_title=None  # We'll get this from participants info
+                                admin_title=None
                             )
                             members.append(member_info)
                             admin_ids.add(admin.id)
@@ -295,7 +297,7 @@ async def get_group_members(
                     from telethon.tl.types import ChannelParticipantsRecent
                     
                     participants_result = await client(GetParticipantsRequest(
-                        channel=input_peer,
+                        channel=entity,
                         filter=ChannelParticipantsRecent(),
                         offset=regular_offset,
                         limit=remaining_limit,
