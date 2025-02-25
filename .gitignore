@@ -41,6 +41,11 @@ yarn-error.log*
 *.swp
 *.swo
 
+# Bot session files
+*.session
+*.session-journal
+bot_session_*
+
 # Bot session
 bot_session.session
 bot_session.session-journal 
