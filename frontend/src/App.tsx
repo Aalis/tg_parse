@@ -1,9 +1,11 @@
 import { MantineProvider, MantineThemeOverride } from '@mantine/core';
+import { Notifications } from '@mantine/notifications';
 import { useState, useEffect } from 'react';
 import { TelegramParser } from './components/TelegramParser';
 import { TokenPoolStatus } from './components/TokenPoolStatus';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import '@mantine/core/styles.css';
+import '@mantine/notifications/styles.css';
 
 function App() {
   // Initialize theme from localStorage or default to false (light theme)
@@ -92,6 +94,7 @@ function App() {
   return (
     <BrowserRouter>
       <MantineProvider theme={theme}>
+        <Notifications />
         <div style={{ 
           padding: '2rem',
           minHeight: '100vh',

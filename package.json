@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@mantine/notifications": "^7.17.0",
+    "@mantine/styles": "^6.0.22"
+  }
+}

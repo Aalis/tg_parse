@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   TextInput,
   Button,
@@ -18,10 +18,14 @@ import {
   LoadingOverlay,
   Tooltip,
   Progress,
+  Modal,
+  Code,
+  Notification,
 } from '@mantine/core';
-import { IconBrandTelegram, IconMoonStars, IconSun, IconUsers, IconMessage, IconShield, IconDashboard } from '@tabler/icons-react';
-import { useNavigate } from 'react-router-dom';
+import { IconBrandTelegram, IconMoonStars, IconSun, IconUsers, IconMessage, IconShield, IconDashboard, IconLogin, IconUserPlus, IconLogout, IconUser, IconCopy, IconCheck, IconX, IconInfoCircle, IconFileSpreadsheet, IconDownload } from '@tabler/icons-react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
+import { notifications } from '@mantine/notifications';
 
 interface GroupInfo {
   group_id: string;
@@ -54,7 +58,85 @@ interface MembersResponse {
   has_more: boolean;
 }
 
+interface UserInfo {
+  id: number;
+  email: string;
+  username: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  is_verified: boolean;
+}
+
+const sanitizeFilename = (filename: string): string => {
+  // Remove special characters but keep basic punctuation and spaces
+  return filename
+    .replace(/[^\w\s-]/g, '') // Remove special characters
+    .replace(/[-\s]+/g, '_') // Replace spaces and hyphens with underscore
+    .trim() // Remove leading/trailing spaces
+    || 'group'; // Fallback if empty
+};
+
+const downloadCSV = (members: MemberInfo[], groupName: string) => {
+  const headers = ['User ID', 'Username', 'First Name', 'Last Name', 'Is Premium', 'Is Admin', 'Admin Title', 'Can Message'];
+  const csvContent = [
+    headers.join(','),
+    ...members.map(member => [
+      member.user_id,
+      member.username || '',
+      (member.first_name || '').replace(/,/g, ' '),
+      (member.last_name || '').replace(/,/g, ' '),
+      member.is_premium ? 'Yes' : 'No',
+      member.is_admin ? 'Yes' : 'No',
+      (member.admin_title || '').replace(/,/g, ' '),
+      member.can_message ? 'Yes' : 'No'
+    ].join(','))
+  ].join('\n');
+
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.setAttribute('href', url);
+  const currentDate = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const safeFilename = sanitizeFilename(groupName);
+  link.setAttribute('download', `${safeFilename}-members-${currentDate}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+const downloadExcel = async (members: MemberInfo[], groupName: string) => {
+  try {
+    const response = await axios.post(
+      'http://localhost:8000/api/export-excel',
+      { members, group_name: groupName },
+      { 
+        responseType: 'blob',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      }
+    );
+    
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    const currentDate = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const safeFilename = sanitizeFilename(groupName);
+    link.setAttribute('download', `${safeFilename}-members-${currentDate}.xlsx`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } catch (error) {
+    notifications.show({
+      title: 'Export Failed',
+      message: 'Failed to export data to Excel. Please try again.',
+      color: 'red'
+    });
+  }
+};
+
 export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const [groupLink, setGroupLink] = useState('');
   const [loading, setLoading] = useState(false);
@@ -64,7 +146,60 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
   const [currentPage, setCurrentPage] = useState(1);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [fetchProgress, setFetchProgress] = useState(0);
+  const [loginModalOpened, setLoginModalOpened] = useState(false);
+  const [registerModalOpened, setRegisterModalOpened] = useState(false);
+  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [currentUser, setCurrentUser] = useState<UserInfo | null>(null);
+  const [verificationModalOpened, setVerificationModalOpened] = useState(false);
+  const [verificationLink, setVerificationLink] = useState('');
+  const [verificationStatusModalOpened, setVerificationStatusModalOpened] = useState(false);
+  const [verificationStatus, setVerificationStatus] = useState<'success' | 'already' | 'expired' | null>(null);
   const MEMBERS_PER_PAGE = 50;
+
+  useEffect(() => {
+    // Check if user is logged in on component mount
+    const token = localStorage.getItem('token');
+    if (token) {
+      fetchUserInfo(token);
+    }
+  }, []);
+
+  useEffect(() => {
+    const verificationStatus = searchParams.get('verified');
+    if (verificationStatus) {
+      // Remove the query parameter
+      navigate('/', { replace: true });
+      
+      // Show verification modal based on status
+      if (verificationStatus === 'success' || verificationStatus === 'already' || verificationStatus === 'expired') {
+        setVerificationStatus(verificationStatus);
+        setVerificationStatusModalOpened(true);
+      }
+    }
+  }, [searchParams, navigate]);
+
+  const fetchUserInfo = async (token: string) => {
+    try {
+      const response = await axios.get('http://localhost:8000/users/me', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      setCurrentUser(response.data);
+      setError(null);
+    } catch (err) {
+      console.error('Error fetching user info:', err);
+      localStorage.removeItem('token');
+      setCurrentUser(null);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    setCurrentUser(null);
+  };
 
   const getCurrentPageMembers = () => {
     const startIndex = (currentPage - 1) * MEMBERS_PER_PAGE;
@@ -80,11 +215,15 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
 
     try {
       const cleanLink = groupLink.trim();
+      const token = localStorage.getItem('token');
       
       const response = await axios.post('http://localhost:8000/api/parse-group', null, {
         params: {
           group_link: cleanLink
-        }
+        },
+        headers: token ? {
+          'Authorization': `Bearer ${token}`
+        } : undefined
       });
       
       if (response.data.success) {
@@ -207,6 +346,51 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
     window.open(`https://t.me/${username}`, '_blank');
   };
 
+  const handleLogin = async () => {
+    try {
+      const response = await axios.post('http://localhost:8000/token', 
+        new URLSearchParams({
+          'username': username,
+          'password': password,
+        }),
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        }
+      );
+      const token = response.data.access_token;
+      localStorage.setItem('token', token);
+      await fetchUserInfo(token);
+      setLoginModalOpened(false);
+      setUsername('');
+      setPassword('');
+      setError(null);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Login failed');
+    }
+  };
+
+  // Add axios interceptor to handle authentication
+  useEffect(() => {
+    const interceptor = axios.interceptors.request.use(
+      (config) => {
+        const token = localStorage.getItem('token');
+        if (token) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+
+    return () => {
+      axios.interceptors.request.eject(interceptor);
+    };
+  }, []);
+
   return (
     <Container size="lg">
       <Group justify="space-between" mb="xl">
@@ -220,6 +404,59 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
           </Group>
         </Title>
         <Group>
+          {currentUser ? (
+            <>
+              <Paper p="xs" radius="md" withBorder style={{
+                backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
+              }}>
+                <Group gap="xs">
+                  <IconUser size={18} />
+                  <Text size="sm" fw={500}>
+                    {currentUser.username}
+                  </Text>
+                  <Badge size="sm" variant="light" color="green">
+                    Logged In
+                  </Badge>
+                  {currentUser.is_verified ? (
+                    <Badge size="sm" variant="light" color="blue">
+                      Verified
+                    </Badge>
+                  ) : (
+                    <Badge size="sm" variant="light" color="yellow">
+                      Unverified
+                    </Badge>
+                  )}
+                </Group>
+              </Paper>
+              <Button
+                variant="outline"
+                leftSection={<IconLogout size={18} />}
+                onClick={handleLogout}
+                color="red"
+              >
+                Logout
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                leftSection={<IconUserPlus size={18} />}
+                onClick={() => setRegisterModalOpened(true)}
+                color={isDark ? 'blue' : 'blue'}
+              >
+                Register
+              </Button>
+              <Button
+                variant="outline"
+                leftSection={<IconLogin size={18} />}
+                onClick={() => setLoginModalOpened(true)}
+                color={isDark ? 'blue' : 'blue'}
+              >
+                Login
+              </Button>
+            </>
+          )}
           <Tooltip label="View token pool status">
             <ActionIcon
               variant="outline"
@@ -244,6 +481,454 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
           </ActionIcon>
         </Group>
       </Group>
+
+      {/* Login Modal */}
+      <Modal
+        opened={loginModalOpened}
+        onClose={() => {
+          setLoginModalOpened(false);
+          setUsername('');
+          setPassword('');
+          setError(null);
+        }}
+        title={
+          <Text 
+            size="lg" 
+            fw={600} 
+            style={{ 
+              fontFamily: 'Inter, sans-serif',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-dark-9)'
+            }}
+          >
+            Login
+          </Text>
+        }
+        centered
+        size="sm"
+        styles={{
+          header: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
+          },
+          content: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-7)' : 'var(--mantine-color-white)',
+          },
+          close: {
+            width: '32px',
+            height: '32px',
+            backgroundColor: isDark ? 'var(--mantine-color-dark-5)' : 'var(--mantine-color-gray-1)',
+            border: `2px solid ${isDark ? 'var(--mantine-color-dark-4)' : 'var(--mantine-color-gray-3)'}`,
+            borderRadius: '4px',
+            color: isDark ? 'var(--mantine-color-gray-4)' : 'var(--mantine-color-dark-4)',
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            '&:hover': {
+              backgroundColor: isDark ? 'var(--mantine-color-blue-8)' : 'var(--mantine-color-blue-1)',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-blue-6)',
+              border: `2px solid ${isDark ? 'var(--mantine-color-blue-7)' : 'var(--mantine-color-blue-5)'}`,
+              transform: 'scale(1.15)',
+            }
+          }
+        }}
+      >
+        <Stack>
+          <TextInput
+            required
+            label="Username"
+            placeholder="Enter your username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            styles={(theme) => ({
+              input: {
+                backgroundColor: isDark ? theme.colors.dark[6] : theme.white,
+                color: isDark ? theme.colors.dark[0] : theme.black,
+                borderColor: isDark ? theme.colors.dark[4] : theme.colors.gray[4],
+              },
+              label: {
+                color: isDark ? theme.colors.dark[0] : theme.black,
+              }
+            })}
+          />
+          <TextInput
+            required
+            type="password"
+            label="Password"
+            placeholder="Enter your password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyPress={(e) => {
+              if (e.key === 'Enter') {
+                handleLogin();
+              }
+            }}
+            styles={(theme) => ({
+              input: {
+                backgroundColor: isDark ? theme.colors.dark[6] : theme.white,
+                color: isDark ? theme.colors.dark[0] : theme.black,
+                borderColor: isDark ? theme.colors.dark[4] : theme.colors.gray[4],
+              },
+              label: {
+                color: isDark ? theme.colors.dark[0] : theme.black,
+              }
+            })}
+          />
+          {error && (
+            <Text color="red" size="sm">
+              {error}
+            </Text>
+          )}
+          <Button 
+            onClick={handleLogin}
+            variant="filled"
+            style={{
+              backgroundColor: isDark ? 'var(--mantine-color-blue-7)' : 'var(--mantine-color-blue-6)',
+            }}
+          >
+            Login
+          </Button>
+        </Stack>
+      </Modal>
+
+      {/* Register Modal */}
+      <Modal
+        opened={registerModalOpened}
+        onClose={() => {
+          setRegisterModalOpened(false);
+          setEmail('');
+          setUsername('');
+          setPassword('');
+          setError(null);
+        }}
+        title={
+          <Text 
+            size="lg" 
+            fw={600} 
+            style={{ 
+              fontFamily: 'Inter, sans-serif',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-dark-9)'
+            }}
+          >
+            Register
+          </Text>
+        }
+        centered
+        size="sm"
+        styles={{
+          header: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
+          },
+          content: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-7)' : 'var(--mantine-color-white)',
+          },
+          close: {
+            width: '32px',
+            height: '32px',
+            backgroundColor: isDark ? 'var(--mantine-color-dark-5)' : 'var(--mantine-color-gray-1)',
+            border: `2px solid ${isDark ? 'var(--mantine-color-dark-4)' : 'var(--mantine-color-gray-3)'}`,
+            borderRadius: '4px',
+            color: isDark ? 'var(--mantine-color-gray-4)' : 'var(--mantine-color-dark-4)',
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            '&:hover': {
+              backgroundColor: isDark ? 'var(--mantine-color-blue-8)' : 'var(--mantine-color-blue-1)',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-blue-6)',
+              border: `2px solid ${isDark ? 'var(--mantine-color-blue-7)' : 'var(--mantine-color-blue-5)'}`,
+              transform: 'scale(1.15)',
+            }
+          }
+        }}
+      >
+        <Stack>
+          <TextInput
+            required
+            label="Email"
+            placeholder="Enter your email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            styles={(theme) => ({
+              input: {
+                backgroundColor: isDark ? theme.colors.dark[6] : theme.white,
+                color: isDark ? theme.colors.dark[0] : theme.black,
+                borderColor: isDark ? theme.colors.dark[4] : theme.colors.gray[4],
+              },
+              label: {
+                color: isDark ? theme.colors.dark[0] : theme.black,
+              }
+            })}
+          />
+          <TextInput
+            required
+            label="Username"
+            placeholder="Choose a username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            styles={(theme) => ({
+              input: {
+                backgroundColor: isDark ? theme.colors.dark[6] : theme.white,
+                color: isDark ? theme.colors.dark[0] : theme.black,
+                borderColor: isDark ? theme.colors.dark[4] : theme.colors.gray[4],
+              },
+              label: {
+                color: isDark ? theme.colors.dark[0] : theme.black,
+              }
+            })}
+          />
+          <TextInput
+            required
+            type="password"
+            label="Password"
+            placeholder="Choose a password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            styles={(theme) => ({
+              input: {
+                backgroundColor: isDark ? theme.colors.dark[6] : theme.white,
+                color: isDark ? theme.colors.dark[0] : theme.black,
+                borderColor: isDark ? theme.colors.dark[4] : theme.colors.gray[4],
+              },
+              label: {
+                color: isDark ? theme.colors.dark[0] : theme.black,
+              }
+            })}
+          />
+          {error && (
+            <Text color="red" size="sm">
+              {error}
+            </Text>
+          )}
+          <Button
+            onClick={async () => {
+              try {
+                const response = await axios.post('http://localhost:8000/register', {
+                  email,
+                  username,
+                  password,
+                });
+                
+                // Show verification instructions
+                const verificationToken = response.data.verification_token;
+                const verificationUrl = `http://localhost:8000/verify/${verificationToken}`;
+                
+                setRegisterModalOpened(false);
+                setEmail('');
+                setUsername('');
+                setPassword('');
+                setError(null);
+                
+                // Show verification modal instead of alert
+                setVerificationLink(verificationUrl);
+                setVerificationModalOpened(true);
+              } catch (err: any) {
+                setError(err.response?.data?.detail || 'Registration failed');
+              }
+            }}
+            variant="filled"
+            style={{
+              backgroundColor: isDark ? 'var(--mantine-color-blue-7)' : 'var(--mantine-color-blue-6)',
+            }}
+          >
+            Register
+          </Button>
+        </Stack>
+      </Modal>
+
+      {/* Verification Modal */}
+      <Modal
+        opened={verificationModalOpened}
+        onClose={() => {
+          setVerificationModalOpened(false);
+          setLoginModalOpened(true);
+        }}
+        title={
+          <Text 
+            size="lg" 
+            fw={600} 
+            style={{ 
+              fontFamily: 'Inter, sans-serif',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-dark-9)'
+            }}
+          >
+            Registration Successful!
+          </Text>
+        }
+        centered
+        size="lg"
+        styles={{
+          header: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
+          },
+          content: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-7)' : 'var(--mantine-color-white)',
+          },
+          close: {
+            width: '32px',
+            height: '32px',
+            backgroundColor: isDark ? 'var(--mantine-color-dark-5)' : 'var(--mantine-color-gray-1)',
+            border: `2px solid ${isDark ? 'var(--mantine-color-dark-4)' : 'var(--mantine-color-gray-3)'}`,
+            borderRadius: '4px',
+            color: isDark ? 'var(--mantine-color-gray-4)' : 'var(--mantine-color-dark-4)',
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            '&:hover': {
+              backgroundColor: isDark ? 'var(--mantine-color-blue-8)' : 'var(--mantine-color-blue-1)',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-blue-6)',
+              border: `2px solid ${isDark ? 'var(--mantine-color-blue-7)' : 'var(--mantine-color-blue-5)'}`,
+              transform: 'scale(1.15)',
+            }
+          }
+        }}
+      >
+        <Stack gap="md">
+          <Text>Please verify your email by visiting the following link:</Text>
+          <Paper 
+            p="md" 
+            withBorder 
+            style={{
+              backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
+              position: 'relative'
+            }}
+          >
+            <Group justify="space-between" align="center">
+              <Code style={{ 
+                flex: 1,
+                wordBreak: 'break-all',
+                backgroundColor: isDark ? 'var(--mantine-color-dark-8)' : 'var(--mantine-color-gray-1)',
+                padding: '10px',
+                borderRadius: '4px',
+                color: isDark ? 'var(--mantine-color-blue-4)' : 'var(--mantine-color-blue-7)'
+              }}>
+                {verificationLink}
+              </Code>
+              <ActionIcon
+                variant="light"
+                color="blue"
+                onClick={() => {
+                  navigator.clipboard.writeText(verificationLink);
+                }}
+                title="Copy link"
+                style={{
+                  marginLeft: '8px'
+                }}
+              >
+                <IconCopy size={18} />
+              </ActionIcon>
+            </Group>
+          </Paper>
+          <Text size="sm" c="dimmed">
+            In a real application, this link would be sent to your email address.
+          </Text>
+          <Button
+            onClick={() => {
+              setVerificationModalOpened(false);
+              setLoginModalOpened(true);
+            }}
+            variant="light"
+            color="blue"
+            fullWidth
+          >
+            Proceed to Login
+          </Button>
+        </Stack>
+      </Modal>
+
+      {/* Verification Status Modal */}
+      <Modal
+        opened={verificationStatusModalOpened}
+        onClose={() => {
+          setVerificationStatusModalOpened(false);
+          setVerificationStatus(null);
+          // Open login modal if verification was successful
+          if (verificationStatus === 'success') {
+            setLoginModalOpened(true);
+          }
+        }}
+        title={
+          <Text 
+            size="lg" 
+            fw={600} 
+            style={{ 
+              fontFamily: 'Inter, sans-serif',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-dark-9)'
+            }}
+          >
+            {verificationStatus === 'success' && 'Email Verified Successfully!'}
+            {verificationStatus === 'already' && 'Email Already Verified'}
+            {verificationStatus === 'expired' && 'Verification Link Expired'}
+          </Text>
+        }
+        centered
+        size="md"
+        styles={{
+          header: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
+          },
+          content: {
+            backgroundColor: isDark ? 'var(--mantine-color-dark-7)' : 'var(--mantine-color-white)',
+          },
+          close: {
+            width: '32px',
+            height: '32px',
+            backgroundColor: isDark ? 'var(--mantine-color-dark-5)' : 'var(--mantine-color-gray-1)',
+            border: `2px solid ${isDark ? 'var(--mantine-color-dark-4)' : 'var(--mantine-color-gray-3)'}`,
+            borderRadius: '4px',
+            color: isDark ? 'var(--mantine-color-gray-4)' : 'var(--mantine-color-dark-4)',
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            '&:hover': {
+              backgroundColor: isDark ? 'var(--mantine-color-blue-8)' : 'var(--mantine-color-blue-1)',
+              color: isDark ? 'var(--mantine-color-white)' : 'var(--mantine-color-blue-6)',
+              border: `2px solid ${isDark ? 'var(--mantine-color-blue-7)' : 'var(--mantine-color-blue-5)'}`,
+              transform: 'scale(1.15)',
+            }
+          }
+        }}
+      >
+        <Stack gap="md">
+          <Paper 
+            p="md" 
+            withBorder 
+            style={{
+              backgroundColor: isDark ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
+              textAlign: 'center'
+            }}
+          >
+            {verificationStatus === 'success' && (
+              <>
+                <IconCheck size={48} color="green" style={{ marginBottom: '1rem' }} />
+                <Text size="md" style={{ color: isDark ? 'var(--mantine-color-white)' : 'inherit' }}>
+                  Your email has been successfully verified. You can now log in to your account.
+                </Text>
+              </>
+            )}
+            {verificationStatus === 'already' && (
+              <>
+                <IconInfoCircle size={48} color="blue" style={{ marginBottom: '1rem' }} />
+                <Text size="md" style={{ color: isDark ? 'var(--mantine-color-white)' : 'inherit' }}>
+                  Your email was already verified. You can proceed to log in.
+                </Text>
+              </>
+            )}
+            {verificationStatus === 'expired' && (
+              <>
+                <IconX size={48} color="red" style={{ marginBottom: '1rem' }} />
+                <Text size="md" style={{ color: isDark ? 'var(--mantine-color-white)' : 'inherit' }}>
+                  The verification link has expired. Please register again to receive a new verification link.
+                </Text>
+              </>
+            )}
+          </Paper>
+          <Button
+            onClick={() => {
+              setVerificationStatusModalOpened(false);
+              if (verificationStatus === 'success' || verificationStatus === 'already') {
+                setLoginModalOpened(true);
+              } else if (verificationStatus === 'expired') {
+                setRegisterModalOpened(true);
+              }
+            }}
+            variant="light"
+            color={verificationStatus === 'expired' ? 'red' : 'blue'}
+            fullWidth
+          >
+            {verificationStatus === 'expired' ? 'Register Again' : 'Proceed to Login'}
+          </Button>
+        </Stack>
+      </Modal>
 
       <Paper shadow="sm" p="xl" radius="md" withBorder>
         <form onSubmit={handleSubmit}>
@@ -327,28 +1012,78 @@ export function TelegramParser({ onToggleTheme, isDark }: TelegramParserProps) {
         <Card shadow="sm" p="lg" mt="md" radius="md" withBorder>
           <Stack>
             <Group justify="space-between">
-              <Title 
-                order={3} 
-                style={{ 
-                  color: isDark ? 'var(--mantine-color-blue-4)' : 'inherit',
-                  fontFamily: 'Inter, sans-serif',
-                  fontWeight: 600
-                }}
-              >
-                {groupInfo.name}
-              </Title>
-              <Badge 
-                size="lg" 
-                variant="filled"
-                styles={{
-                  root: {
-                    fontFamily: '"SF Pro Text", sans-serif',
-                    fontWeight: 500
-                  }
-                }}
-              >
-                {groupInfo.member_count ?? 'N/A'} members
-              </Badge>
+              <Group gap="md">
+                <Title 
+                  order={3} 
+                  style={{ 
+                    color: isDark ? 'var(--mantine-color-blue-4)' : 'inherit',
+                    fontFamily: 'Inter, sans-serif',
+                    fontWeight: 600
+                  }}
+                >
+                  {groupInfo.name}
+                </Title>
+                <Badge 
+                  size="lg" 
+                  variant="filled"
+                  styles={{
+                    root: {
+                      fontFamily: '"SF Pro Text", sans-serif',
+                      fontWeight: 500
+                    }
+                  }}
+                >
+                  {groupInfo.member_count ?? 'N/A'} members
+                </Badge>
+              </Group>
+              {currentUser && allMembers.length > 0 && (
+                <Group>
+                  <Button
+                    variant="outline"
+                    leftSection={<IconDownload size={16} />}
+                    onClick={() => downloadCSV(allMembers, groupInfo.name)}
+                    color="blue"
+                    size="sm"
+                    styles={(theme) => ({
+                      root: {
+                        border: `1px solid ${isDark ? theme.colors.blue[9] : theme.colors.blue[4]}`,
+                        transition: 'all 0.2s ease',
+                        '&:hover': {
+                          backgroundColor: isDark ? theme.colors.blue[9] : theme.colors.blue[1],
+                          transform: 'translateY(-1px)',
+                          boxShadow: isDark 
+                            ? '0 4px 8px rgba(37, 99, 235, 0.3)'
+                            : '0 4px 8px rgba(37, 99, 235, 0.15)',
+                        }
+                      }
+                    })}
+                  >
+                    Export CSV
+                  </Button>
+                  <Button
+                    variant="outline"
+                    leftSection={<IconFileSpreadsheet size={16} />}
+                    onClick={() => downloadExcel(allMembers, groupInfo.name)}
+                    color="green"
+                    size="sm"
+                    styles={(theme) => ({
+                      root: {
+                        border: `1px solid ${isDark ? theme.colors.green[9] : theme.colors.green[4]}`,
+                        transition: 'all 0.2s ease',
+                        '&:hover': {
+                          backgroundColor: isDark ? theme.colors.green[9] : theme.colors.green[1],
+                          transform: 'translateY(-1px)',
+                          boxShadow: isDark 
+                            ? '0 4px 8px rgba(34, 197, 94, 0.3)'
+                            : '0 4px 8px rgba(34, 197, 94, 0.15)',
+                        }
+                      }
+                    })}
+                  >
+                    Export Excel
+                  </Button>
+                </Group>
+              )}
             </Group>
             {groupInfo.description && (
               <Text size="sm" c="dimmed">
